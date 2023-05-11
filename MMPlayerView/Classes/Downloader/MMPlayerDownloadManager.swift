@@ -34,24 +34,56 @@ class MMPlayerDownloadManager: NSObject {
     
     func start(asset: AVURLAsset,fileName: String, status:((_ status: Status)->Void)?) {
         if asset.url.lastPathComponent.contains("m3u8") {
-            let preferredMediaSelection = asset.preferredMediaSelection
-            guard let task = hlsSession.aggregateAssetDownloadTask(with: asset,
-                                                                        mediaSelections: [preferredMediaSelection],
-                                                                        assetTitle: fileName,
-                                                                        assetArtworkData: nil,
-                                                                        options:
-                [AVAssetDownloadTaskMinimumRequiredMediaBitrateKey: 265_000]) else {
-                    status?(.failed(err: "Task Init error"))
-                    return
-            }
-            
-            task.resume()
-            self.taskMap[task] = status
+            URLSession.shared.dataTask(with: .init(url: asset.url)) { [weak self] data, _, _ in
+                self?.addTask(asset: asset, fileName: fileName, options: self?.options(from: data), status: status)
+            }.resume()
         } else {
             let task = fileSession.downloadTask(with: asset.url)
             task.resume()
             self.taskMap[task] = status
         }
+    }
+    
+    private func addTask(asset: AVURLAsset, fileName: String, options: [String: Any]?, status: ((_ status: Status)->Void)?) {
+        let preferredMediaSelection = asset.preferredMediaSelection
+        guard let task = hlsSession.aggregateAssetDownloadTask(with: asset,
+                                                                    mediaSelections: [preferredMediaSelection],
+                                                                    assetTitle: fileName,
+                                                                    assetArtworkData: nil,
+                                                                    options: options) else {
+                status?(.failed(err: "Task Init error"))
+                return
+        }
+        task.resume()
+        self.taskMap[task] = status
+    }
+    
+    private func options(from data: Data?) -> [String: Any] {
+        var bandwith = 265_000
+        var options: [String: Any] = [AVAssetDownloadTaskMinimumRequiredMediaBitrateKey: bandwith]
+        guard let data = data else { return options }
+        var resolution: CGSize?
+        String(data: data, encoding: .utf8)?.split(separator: "\n").forEach { line in
+            line.components(separatedBy: ",").filter { $0.count > 1 && $0.contains("=") }.forEach {
+                let keyAndValue = $0.components(separatedBy: "=")
+                if keyAndValue.first?.uppercased() == "BANDWIDTH", let value = keyAndValue.last,
+                   let int = Int(value), bandwith < int {
+                    bandwith = int
+                    options[AVAssetDownloadTaskMinimumRequiredMediaBitrateKey] = int
+                }
+                else if #available(iOS 14.0, *), keyAndValue.first?.uppercased() == "RESOLUTION",
+                    let sides = keyAndValue.last?.components(separatedBy: "x"),
+                    let widthValue = sides.first, let width = Double(widthValue),
+                    let heightValue = sides.last, let height = Double(heightValue) {
+                    let size = CGSize(width: width, height: height)
+                    if resolution == nil || resolution!.width < size.width { resolution = size }
+                }
+            }
+        }
+        if #available(iOS 14.0, *), let resolution = resolution {
+            options[AVAssetDownloadTaskMinimumRequiredPresentationSizeKey] = resolution
+        }
+        return options
     }
 }
 
